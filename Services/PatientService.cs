@@ -1,3 +1,5 @@
+using HospitalApi.Exceptions;
+using HospitalApi.Models;
 using HospitalApi.Data;
 using HospitalApi.DTOs;
 using Microsoft.EntityFrameworkCore;
@@ -85,5 +87,72 @@ public class PatientService : IPatientService
                 }).ToList()
             })
             .ToListAsync();
+    }
+    
+    public async Task<int> AssignBedToPatientAsync(string pesel, CreateBedAssignmentDto dto)
+    {
+        if (dto.To.HasValue && dto.From >= dto.To.Value)
+        {
+            throw new BadRequestException("Assignment start date must be earlier than end date.");
+        }
+
+        if (string.IsNullOrWhiteSpace(dto.BedType))
+        {
+            throw new BadRequestException("Bed type is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(dto.Ward))
+        {
+            throw new BadRequestException("Ward is required.");
+        }
+
+        var patientExists = await _context.Patients.AnyAsync(p => p.Pesel == pesel);
+
+        if (!patientExists)
+        {
+            throw new NotFoundException($"Patient with PESEL {pesel} was not found.");
+        }
+
+        var bedType = await _context.BedTypes
+            .FirstOrDefaultAsync(bt => bt.Name == dto.BedType);
+
+        if (bedType is null)
+        {
+            throw new NotFoundException($"Bed type '{dto.BedType}' was not found.");
+        }
+
+        var ward = await _context.Wards
+            .FirstOrDefaultAsync(w => w.Name == dto.Ward);
+
+        if (ward is null)
+        {
+            throw new NotFoundException($"Ward '{dto.Ward}' was not found.");
+        }
+
+        var availableBed = await _context.Beds
+            .Where(b => b.BedTypeId == bedType.Id && b.Room.WardId == ward.Id)
+            .Where(b => !b.BedAssignments.Any(ba =>
+                (dto.To == null || ba.From < dto.To) &&
+                (ba.To == null || dto.From < ba.To)))
+            .FirstOrDefaultAsync();
+
+        if (availableBed is null)
+        {
+            throw new NotFoundException(
+                $"No available bed of type '{dto.BedType}' was found in ward '{dto.Ward}' for the selected period.");
+        }
+
+        var bedAssignment = new BedAssignment
+        {
+            PatientPesel = pesel,
+            BedId = availableBed.Id,
+            From = dto.From,
+            To = dto.To
+        };
+
+        _context.BedAssignments.Add(bedAssignment);
+        await _context.SaveChangesAsync();
+
+        return bedAssignment.Id;
     }
 }
